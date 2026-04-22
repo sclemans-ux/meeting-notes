@@ -17,7 +17,6 @@ const PROJECTS = [
 const NOTION_NOTES_DB     = "a5e8f353-a6b7-49eb-8895-b2d02ac9423a";
 const NOTION_TASKS_DB     = "2aa7f330-9586-4244-9194-7adf6bc93141";
 const NOTION_RESOURCES_DB = "c50a260e-3aa0-4ace-ba00-ac846f0cf49c";
-const NOTION_TOKEN        = process.env.REACT_APP_NOTION_TOKEN;
 
 const extractLinks = (text) =>
   [...text.matchAll(/https?:\/\/[^\s\)\"\']+/g)].map((m) => m[0]);
@@ -49,14 +48,10 @@ function markdownToBlocks(md) {
 }
 
 async function notionPost(endpoint, body) {
-  const res = await fetch(`https://api.notion.com/v1/${endpoint}`, {
+  const res = await fetch("/.netlify/functions/notion", {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${NOTION_TOKEN}`,
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint, payload: body }),
   });
   const data = await res.json();
   if (data.object === "error") throw new Error(data.message);
