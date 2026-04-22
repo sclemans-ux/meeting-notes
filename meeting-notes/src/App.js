@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 
 const PROJECTS = [
   { id: "colab-ui", label: "Co\\Lab UI", color: "#6366F1" },
@@ -17,6 +17,8 @@ const PROJECTS = [
 const NOTION_NOTES_DB     = "a5e8f353-a6b7-49eb-8895-b2d02ac9423a";
 const NOTION_TASKS_DB     = "2aa7f330-9586-4244-9194-7adf6bc93141";
 const NOTION_RESOURCES_DB = "c50a260e-3aa0-4ace-ba00-ac846f0cf49c";
+
+const GDRIVE_BASE = "/Users/sclemans/Google Drive/My Drive/Resources";
 
 const extractLinks = (text) =>
   [...text.matchAll(/https?:\/\/[^\s\)\"\']+/g)].map((m) => m[0]);
@@ -103,6 +105,18 @@ async function saveToNotion(result, project) {
   return { notionUrl: notePage.url, fullTitle };
 }
 
+async function saveDocToNotion(fileName, projectLabel, notes) {
+  return notionPost("pages", {
+    parent: { database_id: NOTION_RESOURCES_DB },
+    properties: {
+      Title: { title: richText(fileName) },
+      Project: { select: { name: projectLabel } },
+      "Date Added": { date: { start: today() } },
+      Notes: { rich_text: richText(notes || "") },
+    },
+  });
+}
+
 async function processNotes(rawNotes, projectLabel, apiKey) {
   const links = extractLinks(rawNotes);
   const prompt = `You are a professional note-taker. Process these raw meeting notes for the "${projectLabel}" project.
@@ -138,6 +152,7 @@ Raw notes:\n${rawNotes}`;
   catch { return JSON.parse(text.replace(/```json|```/g, "").trim()); }
 }
 
+// ── Setup Screen ──────────────────────────────────────────────────────────────
 function SetupScreen({ onSave }) {
   const [key, setKey] = useState("");
   const valid = key.startsWith("sk-ant-");
@@ -163,8 +178,215 @@ function SetupScreen({ onSave }) {
   );
 }
 
+// ── Document Upload Tab ───────────────────────────────────────────────────────
+function DocumentUpload({ projectColor }) {
+  const [docProject, setDocProject] = useState(null);
+  const [docFile, setDocFile] = useState(null);
+  const [docNotes, setDocNotes] = useState("");
+  const [docStatus, setDocStatus] = useState(null); // null | saving | done | error
+  const [docLog, setDocLog] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const docProjectObj = PROJECTS.find(p => p.id === docProject);
+  const docColor = docProjectObj?.color || projectColor;
+
+  const addDocLog = (msg, type = "info") => setDocLog(prev => [...prev, { msg, type }]);
+
+  const handleFileSelect = (file) => {
+    if (file) setDocFile(file);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileSelect(file);
+  };
+
+  const handleSaveDoc = async () => {
+    if (!docFile || !docProject) return;
+    setDocStatus("saving");
+    setDocLog([]);
+
+    // 1. Trigger browser download into Google Drive folder
+    addDocLog("Saving file to Google Drive folder…");
+    try {
+      const url = URL.createObjectURL(docFile);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = docFile.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      addDocLog(`✓ "${docFile.name}" downloaded — move it to: Resources / ${docProjectObj.label}`, "success");
+    } catch (e) {
+      addDocLog("Error saving file: " + e.message, "error");
+    }
+
+    // 2. Save record to Notion Resources
+    addDocLog("Saving record to Notion…");
+    try {
+      await saveDocToNotion(docFile.name, docProjectObj.label, docNotes);
+      addDocLog("✓ Record added to Notion Resources", "success");
+    } catch (e) {
+      addDocLog("Error saving to Notion: " + e.message, "error");
+    }
+
+    setDocStatus("done");
+  };
+
+  const handleReset = () => {
+    setDocFile(null);
+    setDocNotes("");
+    setDocProject(null);
+    setDocStatus(null);
+    setDocLog([]);
+  };
+
+  const card = { background: "#FFF", border: "1.5px solid #E0DDD8", borderRadius: "10px", padding: "24px 28px" };
+  const lbl = { display: "block", fontSize: "11px", fontFamily: "'Inter', sans-serif", fontWeight: "600", letterSpacing: "0.09em", textTransform: "uppercase", color: "#999", marginBottom: "14px" };
+
+  return (
+    <div style={{ animation: "fadeIn 0.3s ease" }}>
+
+      {/* Project picker */}
+      <div style={{ marginBottom: "28px" }}>
+        <span style={lbl}>Project</span>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+          {PROJECTS.map((p) => {
+            const active = docProject === p.id;
+            return (
+              <button key={p.id} onClick={() => setDocProject(p.id)}
+                style={{ padding: "8px 15px", borderRadius: "6px", border: active ? `1.5px solid ${p.color}` : "1.5px solid #E0DDD8", background: active ? p.color : "#FFF", color: active ? "#FFF" : "#444", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer", transition: "all 0.15s" }}>
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Drop zone */}
+      <div style={{ marginBottom: "24px" }}>
+        <span style={lbl}>Document</span>
+        <div
+          onClick={() => fileInputRef.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+          style={{
+            border: `2px dashed ${isDragging ? docColor : docFile ? docColor : "#E0DDD8"}`,
+            borderRadius: "10px",
+            padding: "36px 24px",
+            textAlign: "center",
+            cursor: "pointer",
+            background: isDragging ? `${docColor}08` : docFile ? `${docColor}06` : "#FAFAF8",
+            transition: "all 0.2s",
+          }}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.key,.pages,.numbers"
+            onChange={(e) => handleFileSelect(e.target.files[0])}
+            style={{ display: "none" }}
+          />
+          {docFile ? (
+            <div>
+              <div style={{ fontSize: "28px", marginBottom: "8px" }}>📄</div>
+              <div style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", color: "#1A1A1A", marginBottom: "4px" }}>{docFile.name}</div>
+              <div style={{ fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>
+                {(docFile.size / 1024 / 1024).toFixed(2)} MB · Click to change
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ fontSize: "28px", marginBottom: "10px" }}>📂</div>
+              <div style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "500", color: "#666", marginBottom: "6px" }}>
+                Drop a file here or click to browse
+              </div>
+              <div style={{ fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>
+                PDF, Word, PowerPoint, Excel, and more
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Optional notes */}
+      <div style={{ marginBottom: "24px" }}>
+        <span style={lbl}>Notes <span style={{ fontWeight: "400", color: "#CCC" }}>(optional)</span></span>
+        <textarea
+          value={docNotes}
+          onChange={e => setDocNotes(e.target.value)}
+          placeholder="Add context about this document — what it is, why it's relevant…"
+          style={{ width: "100%", minHeight: "100px", padding: "16px 18px", background: "#FFF", border: "1.5px solid #E0DDD8", borderRadius: "10px", color: "#1A1A1A", fontSize: "14px", lineHeight: "1.7", resize: "vertical", outline: "none", fontFamily: "Georgia, serif", transition: "border-color 0.2s" }}
+          onFocus={e => e.target.style.borderColor = docColor}
+          onBlur={e => e.target.style.borderColor = "#E0DDD8"}
+        />
+      </div>
+
+      {/* Google Drive path info */}
+      {docProject && docFile && (
+        <div style={{ ...card, marginBottom: "24px", background: "#F8F7F4", padding: "16px 20px" }}>
+          <div style={{ fontSize: "11px", fontFamily: "'Inter', sans-serif", fontWeight: "600", letterSpacing: "0.09em", textTransform: "uppercase", color: "#BBB", marginBottom: "8px" }}>
+            Save destination
+          </div>
+          <div style={{ fontSize: "13px", fontFamily: "'Inter', sans-serif", color: "#555", lineHeight: "1.6" }}>
+            <span style={{ color: docColor, fontWeight: "600" }}>Google Drive: </span>
+            Resources / {docProjectObj?.label} / {docFile.name}
+          </div>
+          <div style={{ fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif", marginTop: "6px" }}>
+            The file will download — drag it into your Google Drive desktop folder to sync.
+          </div>
+        </div>
+      )}
+
+      {/* Save button */}
+      {docStatus === null && (
+        <button
+          onClick={handleSaveDoc}
+          disabled={!docFile || !docProject}
+          style={{ padding: "13px 28px", borderRadius: "8px", border: "none", background: docFile && docProject ? docColor : "#E0DDD8", color: docFile && docProject ? "#FFF" : "#AAA", fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: docFile && docProject ? "pointer" : "not-allowed", transition: "all 0.2s", marginBottom: "0" }}
+        >
+          Save Document →
+        </button>
+      )}
+
+      {/* Status log */}
+      {(docStatus === "saving" || docStatus === "done") && (
+        <div style={{ ...card, marginBottom: "24px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+            {docStatus === "saving" && <div style={{ width: "16px", height: "16px", border: `2px solid ${docColor}30`, borderTopColor: docColor, borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />}
+            {docStatus === "done" && <span style={{ fontSize: "16px" }}>✓</span>}
+            <span style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", color: "#1A1A1A" }}>
+              {docStatus === "saving" ? "Saving…" : "Done!"}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            {docLog.map((log, i) => (
+              <div key={i} style={{ fontSize: "12px", fontFamily: "'Inter', sans-serif", color: log.type === "success" ? "#059669" : log.type === "error" ? "#B91C1C" : "#888", display: "flex", gap: "8px", lineHeight: "1.5" }}>
+                <span style={{ flexShrink: 0 }}>{log.type === "success" ? "✓" : log.type === "error" ? "✗" : "·"}</span>
+                <span>{log.msg}</span>
+              </div>
+            ))}
+          </div>
+          {docStatus === "done" && (
+            <button onClick={handleReset} style={{ marginTop: "16px", padding: "9px 20px", background: "transparent", border: "1.5px solid #E0DDD8", borderRadius: "8px", color: "#666", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer" }}>
+              ← Upload Another
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem("anthropic_key") || "");
+  const [mainTab, setMainTab] = useState("notes"); // notes | upload
   const [step, setStep] = useState("input");
   const [rawNotes, setRawNotes] = useState("");
   const [selectedProject, setSelectedProject] = useState(null);
@@ -236,11 +458,12 @@ export default function App() {
         @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
       `}</style>
 
+      {/* Top bar */}
       <div style={{ borderBottom: "1px solid #E5E3DE", background: "#FFF", padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "54px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
           <div style={{ width: "9px", height: "9px", borderRadius: "50%", background: projectColor, transition: "background 0.3s" }} />
           <span style={{ fontSize: "15px", fontWeight: "500", color: "#1A1A1A", fontFamily: "'Inter', sans-serif" }}>Meeting Notes</span>
-          {project && <>
+          {project && mainTab === "notes" && <>
             <span style={{ color: "#CCC", fontFamily: "'Inter', sans-serif" }}>/</span>
             <span style={{ fontSize: "15px", color: projectColor, fontFamily: "'Inter', sans-serif", fontWeight: "500" }}>{project.label}</span>
           </>}
@@ -251,110 +474,133 @@ export default function App() {
         </button>
       </div>
 
+      {/* Main tab switcher */}
+      <div style={{ borderBottom: "1px solid #E5E3DE", background: "#FFF", padding: "0 32px", display: "flex", gap: "0" }}>
+        {[{ id: "notes", label: "📝  Meeting Notes" }, { id: "upload", label: "📎  Upload Document" }].map(tab => (
+          <button key={tab.id} onClick={() => setMainTab(tab.id)} style={{
+            padding: "14px 20px", background: "none", border: "none",
+            borderBottom: mainTab === tab.id ? `2px solid ${projectColor}` : "2px solid transparent",
+            color: mainTab === tab.id ? "#1A1A1A" : "#888",
+            fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: mainTab === tab.id ? "600" : "400",
+            cursor: "pointer", transition: "all 0.15s", marginBottom: "-1px",
+          }}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
       <div style={{ maxWidth: "740px", margin: "0 auto", padding: "44px 24px 80px" }}>
 
-        {error && <div style={{ padding: "14px 18px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: "8px", color: "#B91C1C", fontSize: "14px", fontFamily: "'Inter', sans-serif", marginBottom: "24px" }}>{error}</div>}
+        {/* ── UPLOAD TAB ── */}
+        {mainTab === "upload" && <DocumentUpload projectColor={projectColor} />}
 
-        {step === "input" && (
-          <div style={{ animation: "fadeIn 0.3s ease" }}>
-            <div style={{ marginBottom: "36px" }}>
-              <span style={lbl}>Project</span>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-                {PROJECTS.map((p) => {
-                  const active = selectedProject === p.id;
-                  return <button key={p.id} onClick={() => setSelectedProject(p.id)} style={{ padding: "8px 15px", borderRadius: "6px", border: active ? `1.5px solid ${p.color}` : "1.5px solid #E0DDD8", background: active ? p.color : "#FFF", color: active ? "#FFF" : "#444", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer", transition: "all 0.15s" }}>{p.label}</button>;
-                })}
-              </div>
-            </div>
-            <div style={{ marginBottom: "28px" }}>
-              <span style={lbl}>Your Notes</span>
-              <textarea value={rawNotes} onChange={(e) => setRawNotes(e.target.value)}
-                placeholder={"Paste your raw notes here — messy is fine.\n\nInclude any links you'd like saved too."}
-                style={{ width: "100%", minHeight: "300px", padding: "20px 22px", background: "#FFF", border: "1.5px solid #E0DDD8", borderRadius: "10px", color: "#1A1A1A", fontSize: "15px", lineHeight: "1.8", resize: "vertical", outline: "none", fontFamily: "Georgia, serif", transition: "border-color 0.2s" }}
-                onFocus={(e) => e.target.style.borderColor = projectColor}
-                onBlur={(e) => e.target.style.borderColor = "#E0DDD8"} />
-              {rawNotes.length > 0 && <div style={{ marginTop: "8px", fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>{rawNotes.length} chars · {extractLinks(rawNotes).length} links detected</div>}
-            </div>
-            <button onClick={handleProcess} disabled={!rawNotes.trim() || !selectedProject}
-              style={{ padding: "13px 28px", borderRadius: "8px", border: "none", background: rawNotes.trim() && selectedProject ? projectColor : "#E0DDD8", color: rawNotes.trim() && selectedProject ? "#FFF" : "#AAA", fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: rawNotes.trim() && selectedProject ? "pointer" : "not-allowed", transition: "all 0.2s" }}>
-              Process Notes →
-            </button>
-          </div>
-        )}
+        {/* ── NOTES TAB ── */}
+        {mainTab === "notes" && (
+          <>
+            {error && <div style={{ padding: "14px 18px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: "8px", color: "#B91C1C", fontSize: "14px", fontFamily: "'Inter', sans-serif", marginBottom: "24px" }}>{error}</div>}
 
-        {step === "processing" && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "20px", padding: "100px 0" }}>
-            <div style={{ width: "38px", height: "38px", border: `2px solid ${projectColor}30`, borderTopColor: projectColor, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: "16px", color: "#1A1A1A", fontFamily: "'Inter', sans-serif", fontWeight: "500", marginBottom: "6px" }}>Processing your notes</div>
-              <div style={{ fontSize: "13px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>Cleaning up · Extracting to-dos · Organising links</div>
-            </div>
-          </div>
-        )}
-
-        {step === "result" && result && (
-          <div style={{ animation: "fadeIn 0.3s ease" }}>
-            <div style={{ ...card, borderLeft: `4px solid ${projectColor}`, marginBottom: "28px" }}>
-              <div style={{ fontSize: "11px", fontFamily: "'Inter', sans-serif", fontWeight: "600", letterSpacing: "0.09em", textTransform: "uppercase", color: projectColor, marginBottom: "12px" }}>Summary · {project?.label}</div>
-              <p style={{ margin: 0, fontSize: "15px", lineHeight: "1.8", color: "#222", fontFamily: "Georgia, serif" }}>{result.summary}</p>
-            </div>
-
-            <div style={{ display: "flex", gap: "2px", background: "#ECEAE5", borderRadius: "9px", padding: "3px", marginBottom: "20px" }}>
-              {[{ id: "notes", label: "Cleaned Notes" }, { id: "todos", label: `To-dos (${result.todos?.length || 0})` }, { id: "links", label: `Links (${result.links?.length || 0})` }].map((tab) => (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "9px 16px", borderRadius: "7px", border: "none", background: activeTab === tab.id ? "#FFF" : "transparent", color: activeTab === tab.id ? "#1A1A1A" : "#888", fontSize: "13px", fontWeight: activeTab === tab.id ? "600" : "400", cursor: "pointer", fontFamily: "'Inter', sans-serif", boxShadow: activeTab === tab.id ? "0 1px 3px rgba(0,0,0,0.09)" : "none" }}>{tab.label}</button>
-              ))}
-            </div>
-
-            <div style={{ ...card, padding: 0, overflow: "hidden", marginBottom: "24px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 20px", borderBottom: "1px solid #F0EDE8", background: "#FAFAF8" }}>
-                <span style={{ fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>{activeTab === "notes" ? "Formatted notes" : activeTab === "todos" ? "Action items" : "Saved links"}</span>
-                <button onClick={() => { const c = activeTab === "notes" ? result.cleanedNotes : activeTab === "todos" ? result.todos?.map((t, i) => `${i+1}. ${t}`).join("\n") : result.links?.join("\n"); copyToClipboard(c || "", activeTab); }}
-                  style={{ padding: "5px 14px", background: copiedSection === activeTab ? projectColor : "transparent", border: `1px solid ${copiedSection === activeTab ? projectColor : "#E0DDD8"}`, borderRadius: "5px", color: copiedSection === activeTab ? "#FFF" : "#666", fontSize: "12px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer" }}>
-                  {copiedSection === activeTab ? "✓ Copied" : "Copy"}
+            {step === "input" && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={{ marginBottom: "36px" }}>
+                  <span style={lbl}>Project</span>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {PROJECTS.map((p) => {
+                      const active = selectedProject === p.id;
+                      return <button key={p.id} onClick={() => setSelectedProject(p.id)} style={{ padding: "8px 15px", borderRadius: "6px", border: active ? `1.5px solid ${p.color}` : "1.5px solid #E0DDD8", background: active ? p.color : "#FFF", color: active ? "#FFF" : "#444", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer", transition: "all 0.15s" }}>{p.label}</button>;
+                    })}
+                  </div>
+                </div>
+                <div style={{ marginBottom: "28px" }}>
+                  <span style={lbl}>Your Notes</span>
+                  <textarea value={rawNotes} onChange={(e) => setRawNotes(e.target.value)}
+                    placeholder={"Paste your raw notes here — messy is fine.\n\nInclude any links you'd like saved too."}
+                    style={{ width: "100%", minHeight: "300px", padding: "20px 22px", background: "#FFF", border: "1.5px solid #E0DDD8", borderRadius: "10px", color: "#1A1A1A", fontSize: "15px", lineHeight: "1.8", resize: "vertical", outline: "none", fontFamily: "Georgia, serif", transition: "border-color 0.2s" }}
+                    onFocus={(e) => e.target.style.borderColor = projectColor}
+                    onBlur={(e) => e.target.style.borderColor = "#E0DDD8"} />
+                  {rawNotes.length > 0 && <div style={{ marginTop: "8px", fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>{rawNotes.length} chars · {extractLinks(rawNotes).length} links detected</div>}
+                </div>
+                <button onClick={handleProcess} disabled={!rawNotes.trim() || !selectedProject}
+                  style={{ padding: "13px 28px", borderRadius: "8px", border: "none", background: rawNotes.trim() && selectedProject ? projectColor : "#E0DDD8", color: rawNotes.trim() && selectedProject ? "#FFF" : "#AAA", fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: rawNotes.trim() && selectedProject ? "pointer" : "not-allowed", transition: "all 0.2s" }}>
+                  Process Notes →
                 </button>
               </div>
-              <div style={{ padding: "24px 28px", maxHeight: "380px", overflowY: "auto" }}>
-                {activeTab === "notes" && <div style={{ fontSize: "15px", lineHeight: "1.85", color: "#1A1A1A", fontFamily: "Georgia, serif", whiteSpace: "pre-wrap" }}>{result.cleanedNotes}</div>}
-                {activeTab === "todos" && <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>{result.todos?.length ? result.todos.map((todo, i) => (<div key={i} style={{ display: "flex", gap: "14px", alignItems: "flex-start", padding: "14px 16px", background: "#FAFAF8", border: "1px solid #F0EDE8", borderRadius: "8px" }}><div style={{ width: "17px", height: "17px", borderRadius: "4px", border: `1.5px solid ${projectColor}`, flexShrink: 0, marginTop: "3px" }} /><span style={{ fontSize: "14px", color: "#1A1A1A", lineHeight: "1.65", fontFamily: "'Inter', sans-serif" }}>{todo}</span></div>)) : <div style={{ color: "#BBB", fontSize: "14px", fontFamily: "'Inter', sans-serif" }}>No to-dos found.</div>}</div>}
-                {activeTab === "links" && <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>{result.links?.length ? result.links.map((link, i) => (<div key={i} style={{ padding: "12px 16px", background: "#FAFAF8", border: "1px solid #F0EDE8", borderRadius: "8px", display: "flex", alignItems: "center", gap: "12px" }}><div style={{ width: "6px", height: "6px", borderRadius: "50%", background: projectColor, flexShrink: 0 }} /><a href={link} target="_blank" rel="noreferrer" style={{ fontSize: "13px", color: projectColor, textDecoration: "none", wordBreak: "break-all", fontFamily: "'Inter', sans-serif" }}>{link}</a></div>)) : <div style={{ color: "#BBB", fontSize: "14px", fontFamily: "'Inter', sans-serif" }}>No links detected.</div>}</div>}
-              </div>
-            </div>
+            )}
 
-            {saveStatus === null && (
-              <div style={{ ...card, marginBottom: "24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
-                <div>
-                  <div style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", color: "#1A1A1A", marginBottom: "4px" }}>Save to Notion</div>
-                  <div style={{ fontSize: "13px", color: "#888", fontFamily: "'Inter', sans-serif" }}>Note, to-dos and links saved to your project workspace</div>
+            {step === "processing" && (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "20px", padding: "100px 0" }}>
+                <div style={{ width: "38px", height: "38px", border: `2px solid ${projectColor}30`, borderTopColor: projectColor, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: "16px", color: "#1A1A1A", fontFamily: "'Inter', sans-serif", fontWeight: "500", marginBottom: "6px" }}>Processing your notes</div>
+                  <div style={{ fontSize: "13px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>Cleaning up · Extracting to-dos · Organising links</div>
                 </div>
-                <button onClick={handleSave} style={{ padding: "12px 22px", borderRadius: "8px", border: "none", background: projectColor, color: "#FFF", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>Save to Notion →</button>
               </div>
             )}
 
-            {(saveStatus === "saving" || saveStatus === "done") && (
-              <div style={{ ...card, marginBottom: "24px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
-                  {saveStatus === "saving" && <div style={{ width: "16px", height: "16px", border: `2px solid ${projectColor}30`, borderTopColor: projectColor, borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />}
-                  {saveStatus === "done" && <span style={{ fontSize: "16px" }}>✓</span>}
-                  <span style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", color: "#1A1A1A" }}>{saveStatus === "saving" ? "Saving…" : "Saved!"}</span>
+            {step === "result" && result && (
+              <div style={{ animation: "fadeIn 0.3s ease" }}>
+                <div style={{ ...card, borderLeft: `4px solid ${projectColor}`, marginBottom: "28px" }}>
+                  <div style={{ fontSize: "11px", fontFamily: "'Inter', sans-serif", fontWeight: "600", letterSpacing: "0.09em", textTransform: "uppercase", color: projectColor, marginBottom: "12px" }}>Summary · {project?.label}</div>
+                  <p style={{ margin: 0, fontSize: "15px", lineHeight: "1.8", color: "#222", fontFamily: "Georgia, serif" }}>{result.summary}</p>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                  {saveLog.map((log, i) => (
-                    <div key={i} style={{ fontSize: "12px", fontFamily: "'Inter', sans-serif", color: log.type === "success" ? "#059669" : log.type === "error" ? "#B91C1C" : "#888", display: "flex", gap: "8px" }}>
-                      <span>{log.type === "success" ? "✓" : log.type === "error" ? "✗" : "·"}</span>
-                      <span>{log.msg}</span>
-                    </div>
+
+                <div style={{ display: "flex", gap: "2px", background: "#ECEAE5", borderRadius: "9px", padding: "3px", marginBottom: "20px" }}>
+                  {[{ id: "notes", label: "Cleaned Notes" }, { id: "todos", label: `To-dos (${result.todos?.length || 0})` }, { id: "links", label: `Links (${result.links?.length || 0})` }].map((tab) => (
+                    <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "9px 16px", borderRadius: "7px", border: "none", background: activeTab === tab.id ? "#FFF" : "transparent", color: activeTab === tab.id ? "#1A1A1A" : "#888", fontSize: "13px", fontWeight: activeTab === tab.id ? "600" : "400", cursor: "pointer", fontFamily: "'Inter', sans-serif", boxShadow: activeTab === tab.id ? "0 1px 3px rgba(0,0,0,0.09)" : "none" }}>{tab.label}</button>
                   ))}
                 </div>
-                {saveStatus === "done" && notionUrl && (
-                  <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #F0EDE8" }}>
-                    <a href={notionUrl} target="_blank" rel="noreferrer" style={{ padding: "8px 16px", borderRadius: "6px", background: "#1A1A1A", color: "#FFF", fontSize: "12px", fontFamily: "'Inter', sans-serif", fontWeight: "500", textDecoration: "none" }}>Open in Notion →</a>
+
+                <div style={{ ...card, padding: 0, overflow: "hidden", marginBottom: "24px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 20px", borderBottom: "1px solid #F0EDE8", background: "#FAFAF8" }}>
+                    <span style={{ fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>{activeTab === "notes" ? "Formatted notes" : activeTab === "todos" ? "Action items" : "Saved links"}</span>
+                    <button onClick={() => { const c = activeTab === "notes" ? result.cleanedNotes : activeTab === "todos" ? result.todos?.map((t, i) => `${i+1}. ${t}`).join("\n") : result.links?.join("\n"); copyToClipboard(c || "", activeTab); }}
+                      style={{ padding: "5px 14px", background: copiedSection === activeTab ? projectColor : "transparent", border: `1px solid ${copiedSection === activeTab ? projectColor : "#E0DDD8"}`, borderRadius: "5px", color: copiedSection === activeTab ? "#FFF" : "#666", fontSize: "12px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer" }}>
+                      {copiedSection === activeTab ? "✓ Copied" : "Copy"}
+                    </button>
+                  </div>
+                  <div style={{ padding: "24px 28px", maxHeight: "380px", overflowY: "auto" }}>
+                    {activeTab === "notes" && <div style={{ fontSize: "15px", lineHeight: "1.85", color: "#1A1A1A", fontFamily: "Georgia, serif", whiteSpace: "pre-wrap" }}>{result.cleanedNotes}</div>}
+                    {activeTab === "todos" && <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>{result.todos?.length ? result.todos.map((todo, i) => (<div key={i} style={{ display: "flex", gap: "14px", alignItems: "flex-start", padding: "14px 16px", background: "#FAFAF8", border: "1px solid #F0EDE8", borderRadius: "8px" }}><div style={{ width: "17px", height: "17px", borderRadius: "4px", border: `1.5px solid ${projectColor}`, flexShrink: 0, marginTop: "3px" }} /><span style={{ fontSize: "14px", color: "#1A1A1A", lineHeight: "1.65", fontFamily: "'Inter', sans-serif" }}>{todo}</span></div>)) : <div style={{ color: "#BBB", fontSize: "14px", fontFamily: "'Inter', sans-serif" }}>No to-dos found.</div>}</div>}
+                    {activeTab === "links" && <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>{result.links?.length ? result.links.map((link, i) => (<div key={i} style={{ padding: "12px 16px", background: "#FAFAF8", border: "1px solid #F0EDE8", borderRadius: "8px", display: "flex", alignItems: "center", gap: "12px" }}><div style={{ width: "6px", height: "6px", borderRadius: "50%", background: projectColor, flexShrink: 0 }} /><a href={link} target="_blank" rel="noreferrer" style={{ fontSize: "13px", color: projectColor, textDecoration: "none", wordBreak: "break-all", fontFamily: "'Inter', sans-serif" }}>{link}</a></div>)) : <div style={{ color: "#BBB", fontSize: "14px", fontFamily: "'Inter', sans-serif" }}>No links detected.</div>}</div>}
+                  </div>
+                </div>
+
+                {saveStatus === null && (
+                  <div style={{ ...card, marginBottom: "24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
+                    <div>
+                      <div style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", color: "#1A1A1A", marginBottom: "4px" }}>Save to Notion</div>
+                      <div style={{ fontSize: "13px", color: "#888", fontFamily: "'Inter', sans-serif" }}>Note, to-dos and links saved to your project workspace</div>
+                    </div>
+                    <button onClick={handleSave} style={{ padding: "12px 22px", borderRadius: "8px", border: "none", background: projectColor, color: "#FFF", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>Save to Notion →</button>
                   </div>
                 )}
+
+                {(saveStatus === "saving" || saveStatus === "done") && (
+                  <div style={{ ...card, marginBottom: "24px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
+                      {saveStatus === "saving" && <div style={{ width: "16px", height: "16px", border: `2px solid ${projectColor}30`, borderTopColor: projectColor, borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />}
+                      {saveStatus === "done" && <span style={{ fontSize: "16px" }}>✓</span>}
+                      <span style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", color: "#1A1A1A" }}>{saveStatus === "saving" ? "Saving…" : "Saved!"}</span>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                      {saveLog.map((log, i) => (
+                        <div key={i} style={{ fontSize: "12px", fontFamily: "'Inter', sans-serif", color: log.type === "success" ? "#059669" : log.type === "error" ? "#B91C1C" : "#888", display: "flex", gap: "8px" }}>
+                          <span>{log.type === "success" ? "✓" : log.type === "error" ? "✗" : "·"}</span>
+                          <span>{log.msg}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {saveStatus === "done" && notionUrl && (
+                      <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #F0EDE8" }}>
+                        <a href={notionUrl} target="_blank" rel="noreferrer" style={{ padding: "8px 16px", borderRadius: "6px", background: "#1A1A1A", color: "#FFF", fontSize: "12px", fontFamily: "'Inter', sans-serif", fontWeight: "500", textDecoration: "none" }}>Open in Notion →</a>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <button onClick={handleReset} style={{ padding: "11px 22px", background: "transparent", border: "1.5px solid #E0DDD8", borderRadius: "8px", color: "#666", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer" }}>← New Notes</button>
               </div>
             )}
-
-            <button onClick={handleReset} style={{ padding: "11px 22px", background: "transparent", border: "1.5px solid #E0DDD8", borderRadius: "8px", color: "#666", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer" }}>← New Notes</button>
-          </div>
+          </>
         )}
       </div>
     </div>
