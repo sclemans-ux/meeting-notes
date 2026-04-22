@@ -106,8 +106,11 @@ async function saveToNotion(result, project) {
 }
 
 async function saveDocToNotion(fileName, projectLabel, notes) {
-  // Store with Google Drive path as the URL so it's findable
-  const driveUrl = `gdrive://Resources/${projectLabel}/${fileName}`;
+  // Build a file:// URL that opens the file directly on Mac
+  const encodedProject = encodeURIComponent(projectLabel);
+  const encodedFile = encodeURIComponent(fileName);
+  const driveUrl = `file:///Users/sclemans/Google%20Drive/My%20Drive/Resources/${encodedProject}/${encodedFile}`;
+
   const notesText = [
     notes || "",
     `Saved to: Google Drive → Resources / ${projectLabel} / ${fileName}`,
@@ -120,6 +123,7 @@ async function saveDocToNotion(fileName, projectLabel, notes) {
       Project: { select: { name: projectLabel } },
       "Date Added": { date: { start: today() } },
       Notes: { rich_text: richText(notesText) },
+      "userDefined:URL": { url: driveUrl },
     },
   });
 }
