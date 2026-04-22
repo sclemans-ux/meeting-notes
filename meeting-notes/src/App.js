@@ -1,0 +1,449 @@
+import { useState } from "react";
+
+const PROJECTS = [
+  { id: "colab-ui", label: "Co\\Lab UI", color: "#6366F1" },
+  { id: "copygen", label: "CopyGen", color: "#E11D48" },
+  { id: "dubsync", label: "Dubsync", color: "#0891B2" },
+  { id: "apollo", label: "Apollo", color: "#EA580C" },
+  { id: "ai-approvals", label: "AI Approvals", color: "#7C3AED" },
+  { id: "xo-ai-team", label: "XO AI Team", color: "#059669" },
+  { id: "knowledge-library", label: "Knowledge Library", color: "#B45309" },
+  { id: "asset-library", label: "Asset Library", color: "#C2410C" },
+  { id: "ai-production", label: "AI Production", color: "#0369A1" },
+  { id: "dnai", label: "DNAi", color: "#BE185D" },
+  { id: "direct-reports", label: "Direct Reports", color: "#475569" },
+];
+
+// Notion database IDs (set up by Claude)
+const NOTION_NOTES_DS = "6f407c11-5fb7-4054-ae17-73656a726572";
+const NOTION_TASKS_DS = "7334943b-b737-4f27-9c32-00c1767bca8f";
+const NOTION_RESOURCES_DS = "c57c0eae-f17b-41f9-9c6d-34340f1e3b8d";
+
+// Google Drive folder IDs per project
+const GDRIVE_FOLDERS = {
+  "Co\\Lab UI": "1BISgNXWj_HKpSw3umrnhGqvY-dPup2hW",
+  "CopyGen": "1biIzT82K1szzwmbiWz97k04EvvvrQrCG",
+  "Dubsync": "1MqzrMllSZiRDjwOy97Vnfwm0hTUcsqZc",
+  "Apollo": "19MGxMyJN-GyN8m7JbuOv0FlpYYA6jAL8",
+  "AI Approvals": "1IdjXfhYR2ZY7fQvB4GEK6YthUQITZKUH",
+  "XO AI Team": "1xk-dK0uHFsFuNKKQAjhuwI1DSNbcI3kM",
+  "Knowledge Library": "12oNXvI9Kx6kbvbZJRFnDifBdP23SNB6w",
+  "Asset Library": "1gUAL2fWm5goyw-SFUBMUpljP--Jl0755",
+  "AI Production": "1xj0kmJmrg5AUT2MpmBMwNlMH37Iejw92",
+  "DNAi": "1rRET4QEHY81Td3W3jWsP0bpj8ho3pqkp",
+  "Direct Reports": "1xMSmyNTFck3hleRxJmoaO3vW06pdTq_x",
+};
+
+const extractLinks = (text) =>
+  [...text.matchAll(/https?:\/\/[^\s\)\"\']+/g)].map((m) => m[0]);
+
+const today = () => new Date().toISOString().split("T")[0];
+const todayFormatted = () => new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+
+async function processNotes(rawNotes, projectLabel, apiKey) {
+  const links = extractLinks(rawNotes);
+  const prompt = `You are a professional note-taker. Process these raw meeting notes for the "${projectLabel}" project.
+Return ONLY a valid JSON object (no markdown, no backticks) with exactly these keys:
+{
+  "cleanedNotes": "Well-structured markdown notes. Use ## for sections, bullet points for lists.",
+  "todos": ["concise action items starting with a verb, include owner in brackets if mentioned e.g. [Ritu] Review specs"],
+  "summary": "2-3 sentence executive summary",
+  "meetingType": "One word — Meeting, Sync, Review, Workshop, or Briefing",
+  "shortTitle": "4-6 word description of what this was about",
+  "links": ${JSON.stringify(links)}
+}
+Raw notes:\n${rawNotes}`;
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 2000,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  const text = data.content?.[0]?.text || "{}";
+  try { return JSON.parse(text); }
+  catch { return JSON.parse(text.replace(/```json|```/g, "").trim()); }
+}
+
+async function saveToNotion(result, project, apiKey) {
+  const fullTitle = `${result.meetingType}: ${result.shortTitle} — ${todayFormatted()}`;
+
+  // Save meeting note
+  const noteRes = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 2000,
+      messages: [{
+        role: "user",
+        content: `Create a new page in Notion data source "${NOTION_NOTES_DS}" with:
+- Title: "${fullTitle}"
+- Project: "${project.label}"
+- Date: "${today()}"
+- Summary: "${result.summary?.replace(/"/g, "'")}"
+Body content: ${result.cleanedNotes?.replace(/"/g, "'").slice(0, 1500)}
+Return the URL of the created page.`
+      }],
+      mcp_servers: [{ type: "url", url: "https://mcp.notion.com/mcp", name: "notion" }],
+    }),
+  }).then(r => r.json());
+
+  const noteText = noteRes.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  const notionUrl = noteText.match(/https:\/\/(?:www\.)?notion\.so\/[^\s]+/)?.[0];
+
+  // Save todos
+  if (result.todos?.length) {
+    for (const todo of result.todos.slice(0, 8)) {
+      await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 500,
+          messages: [{
+            role: "user",
+            content: `Create a page in Notion data source "${NOTION_TASKS_DS}" with Task: "${todo.replace(/"/g, "'")}", Project: "${project.label}", Status: "To Do", Source: "${fullTitle}"`
+          }],
+          mcp_servers: [{ type: "url", url: "https://mcp.notion.com/mcp", name: "notion" }],
+        }),
+      });
+    }
+  }
+
+  // Save links
+  if (result.links?.length) {
+    for (const link of result.links) {
+      await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 500,
+          messages: [{
+            role: "user",
+            content: `Create a page in Notion data source "${NOTION_RESOURCES_DS}" with Title: "Link from ${fullTitle.replace(/"/g, "'")}", Project: "${project.label}", URL: "${link}", Date Added: "${today()}"`
+          }],
+          mcp_servers: [{ type: "url", url: "https://mcp.notion.com/mcp", name: "notion" }],
+        }),
+      });
+    }
+  }
+
+  return { notionUrl, fullTitle };
+}
+
+async function saveToGDrive(result, project, fullTitle, apiKey) {
+  const folderId = GDRIVE_FOLDERS[project.label];
+  const docContent = `${fullTitle}\nDate: ${todayFormatted()}\nProject: ${project.label}\n\nSUMMARY\n${result.summary}\n\n---\n\n${result.cleanedNotes}\n\n---\n\nTO-DOS\n${result.todos?.map((t, i) => `${i + 1}. ${t}`).join("\n") || "None"}\n\nLINKS\n${result.links?.join("\n") || "None"}`;
+
+  const encoded = btoa(unescape(encodeURIComponent(docContent)));
+
+  const driveRes = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      messages: [{
+        role: "user",
+        content: `Create a Google Doc in folder "${folderId}" titled "${fullTitle}" with this content: ${docContent.slice(0, 1500)}. Return the document URL.`
+      }],
+      mcp_servers: [{ type: "url", url: "https://drivemcp.googleapis.com/mcp/v1", name: "gdrive" }],
+    }),
+  }).then(r => r.json());
+
+  const driveText = driveRes.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  const driveUrl = driveText.match(/https:\/\/docs\.google\.com\/[^\s]+/)?.[0]
+    || driveText.match(/https:\/\/drive\.google\.com\/[^\s]+/)?.[0];
+
+  return driveUrl;
+}
+
+// ── Setup Screen ─────────────────────────────────────────────────────────────
+
+function SetupScreen({ onSave }) {
+  const [key, setKey] = useState("");
+  return (
+    <div style={{ minHeight: "100vh", background: "#F8F7F4", display: "flex", alignItems: "center", justifyContent: "center", padding: "24px" }}>
+      <div style={{ maxWidth: "480px", width: "100%" }}>
+        <h1 style={{ fontFamily: "Georgia, serif", fontSize: "28px", fontWeight: "400", marginBottom: "8px", color: "#1A1A1A" }}>Meeting Notes</h1>
+        <p style={{ fontFamily: "'Inter', sans-serif", fontSize: "14px", color: "#888", marginBottom: "32px", lineHeight: "1.6" }}>
+          To get started, enter your Anthropic API key. This is stored only in your browser — it never leaves your device.
+        </p>
+        <div style={{ marginBottom: "16px" }}>
+          <label style={{ display: "block", fontSize: "11px", fontFamily: "'Inter', sans-serif", fontWeight: "600", letterSpacing: "0.09em", textTransform: "uppercase", color: "#999", marginBottom: "8px" }}>
+            Anthropic API Key
+          </label>
+          <input
+            type="password"
+            value={key}
+            onChange={e => setKey(e.target.value)}
+            placeholder="sk-ant-..."
+            style={{ width: "100%", padding: "12px 16px", border: "1.5px solid #E0DDD8", borderRadius: "8px", fontSize: "14px", fontFamily: "'Inter', sans-serif", outline: "none", background: "#FFF", boxSizing: "border-box" }}
+          />
+        </div>
+        <p style={{ fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif", marginBottom: "20px", lineHeight: "1.6" }}>
+          Get your API key at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: "#6366F1" }}>console.anthropic.com</a> → API Keys. Usage is billed per note processed (typically a few cents).
+        </p>
+        <button
+          onClick={() => { if (key.startsWith("sk-ant-")) { localStorage.setItem("anthropic_key", key); onSave(key); } }}
+          disabled={!key.startsWith("sk-ant-")}
+          style={{ width: "100%", padding: "13px", borderRadius: "8px", border: "none", background: key.startsWith("sk-ant-") ? "#6366F1" : "#E0DDD8", color: key.startsWith("sk-ant-") ? "#FFF" : "#AAA", fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: key.startsWith("sk-ant-") ? "pointer" : "not-allowed" }}
+        >
+          Get Started →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ─────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("anthropic_key") || "");
+  const [step, setStep] = useState("input");
+  const [rawNotes, setRawNotes] = useState("");
+  const [selectedProject, setSelectedProject] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState("notes");
+  const [copiedSection, setCopiedSection] = useState(null);
+  const [saveStatus, setSaveStatus] = useState(null);
+  const [saveLog, setSaveLog] = useState([]);
+  const [savedLinks, setSavedLinks] = useState({ notion: null, gdrive: null });
+
+  const project = PROJECTS.find((p) => p.id === selectedProject);
+  const projectColor = project?.color || "#6366F1";
+
+  if (!apiKey) return <SetupScreen onSave={setApiKey} />;
+
+  const addLog = (msg, type = "info") =>
+    setSaveLog(prev => [...prev, { msg, type }]);
+
+  const handleProcess = async () => {
+    if (!rawNotes.trim() || !selectedProject) return;
+    setStep("processing");
+    setError(null);
+    try {
+      const processed = await processNotes(rawNotes, project.label, apiKey);
+      setResult(processed);
+      setStep("result");
+    } catch (e) {
+      setError("Something went wrong: " + e.message);
+      setStep("input");
+    }
+  };
+
+  const handleSave = async () => {
+    if (!result || !project) return;
+    setSaveStatus("saving");
+    setSaveLog([]);
+    setSavedLinks({ notion: null, gdrive: null });
+
+    try {
+      addLog("Saving to Notion…");
+      const { notionUrl, fullTitle } = await saveToNotion(result, project, apiKey);
+      if (notionUrl) setSavedLinks(l => ({ ...l, notion: notionUrl }));
+      addLog("Note, to-dos and links saved to Notion", "success");
+
+      addLog("Saving to Google Drive…");
+      const driveUrl = await saveToGDrive(result, project, fullTitle, apiKey);
+      if (driveUrl) setSavedLinks(l => ({ ...l, gdrive: driveUrl }));
+      addLog("Note saved to Google Drive", "success");
+    } catch (e) {
+      addLog("Error: " + e.message, "error");
+    }
+    setSaveStatus("done");
+  };
+
+  const handleReset = () => {
+    setStep("input"); setRawNotes(""); setSelectedProject(null);
+    setResult(null); setError(null); setActiveTab("notes");
+    setSaveStatus(null); setSaveLog([]); setSavedLinks({ notion: null, gdrive: null });
+  };
+
+  const copyToClipboard = (text, section) => {
+    navigator.clipboard.writeText(text);
+    setCopiedSection(section);
+    setTimeout(() => setCopiedSection(null), 2000);
+  };
+
+  const card = { background: "#FFFFFF", border: "1.5px solid #E0DDD8", borderRadius: "10px", padding: "24px 28px" };
+  const label = { display: "block", fontSize: "11px", fontFamily: "'Inter', sans-serif", fontWeight: "600", letterSpacing: "0.09em", textTransform: "uppercase", color: "#999", marginBottom: "14px" };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#F8F7F4", fontFamily: "Georgia, serif", color: "#1A1A1A" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+        * { box-sizing: border-box; }
+        textarea::placeholder { color: #BBB; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #DDD; border-radius: 3px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+      `}</style>
+
+      {/* Top bar */}
+      <div style={{ borderBottom: "1px solid #E5E3DE", background: "#FFF", padding: "0 32px", display: "flex", alignItems: "center", justifyContent: "space-between", height: "54px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ width: "9px", height: "9px", borderRadius: "50%", background: projectColor, transition: "background 0.3s" }} />
+          <span style={{ fontSize: "15px", fontWeight: "500", color: "#1A1A1A", fontFamily: "'Inter', sans-serif" }}>Meeting Notes</span>
+          {project && <>
+            <span style={{ color: "#CCC", fontFamily: "'Inter', sans-serif" }}>/</span>
+            <span style={{ fontSize: "15px", color: projectColor, fontFamily: "'Inter', sans-serif", fontWeight: "500" }}>{project.label}</span>
+          </>}
+        </div>
+        <button onClick={() => { localStorage.removeItem("anthropic_key"); setApiKey(""); }} style={{ fontSize: "12px", color: "#BBB", background: "none", border: "none", cursor: "pointer", fontFamily: "'Inter', sans-serif" }}>
+          Change API key
+        </button>
+      </div>
+
+      <div style={{ maxWidth: "740px", margin: "0 auto", padding: "44px 24px 80px" }}>
+
+        {error && <div style={{ padding: "14px 18px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: "8px", color: "#B91C1C", fontSize: "14px", fontFamily: "'Inter', sans-serif", marginBottom: "24px" }}>{error}</div>}
+
+        {/* INPUT */}
+        {step === "input" && (
+          <div style={{ animation: "fadeIn 0.3s ease" }}>
+            <div style={{ marginBottom: "36px" }}>
+              <span style={label}>Project</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                {PROJECTS.map((p) => {
+                  const active = selectedProject === p.id;
+                  return (
+                    <button key={p.id} onClick={() => setSelectedProject(p.id)} style={{ padding: "8px 15px", borderRadius: "6px", border: active ? `1.5px solid ${p.color}` : "1.5px solid #E0DDD8", background: active ? p.color : "#FFF", color: active ? "#FFF" : "#444", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer", transition: "all 0.15s" }}>
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: "28px" }}>
+              <span style={label}>Your Notes</span>
+              <textarea
+                value={rawNotes}
+                onChange={(e) => setRawNotes(e.target.value)}
+                placeholder={"Paste your raw notes here — messy is fine.\n\nInclude any links you'd like saved too."}
+                style={{ width: "100%", minHeight: "300px", padding: "20px 22px", background: "#FFF", border: "1.5px solid #E0DDD8", borderRadius: "10px", color: "#1A1A1A", fontSize: "15px", lineHeight: "1.8", resize: "vertical", outline: "none", fontFamily: "Georgia, serif", transition: "border-color 0.2s" }}
+                onFocus={(e) => e.target.style.borderColor = projectColor}
+                onBlur={(e) => e.target.style.borderColor = "#E0DDD8"}
+              />
+              {rawNotes.length > 0 && <div style={{ marginTop: "8px", fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>{rawNotes.length} chars · {extractLinks(rawNotes).length} links detected</div>}
+            </div>
+
+            <button onClick={handleProcess} disabled={!rawNotes.trim() || !selectedProject} style={{ padding: "13px 28px", borderRadius: "8px", border: "none", background: rawNotes.trim() && selectedProject ? projectColor : "#E0DDD8", color: rawNotes.trim() && selectedProject ? "#FFF" : "#AAA", fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: rawNotes.trim() && selectedProject ? "pointer" : "not-allowed", transition: "all 0.2s" }}>
+              Process Notes →
+            </button>
+          </div>
+        )}
+
+        {/* PROCESSING */}
+        {step === "processing" && (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "20px", padding: "100px 0" }}>
+            <div style={{ width: "38px", height: "38px", border: `2px solid ${projectColor}30`, borderTopColor: projectColor, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: "16px", color: "#1A1A1A", fontFamily: "'Inter', sans-serif", fontWeight: "500", marginBottom: "6px" }}>Processing your notes</div>
+              <div style={{ fontSize: "13px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>Cleaning up · Extracting to-dos · Organising links</div>
+            </div>
+          </div>
+        )}
+
+        {/* RESULT */}
+        {step === "result" && result && (
+          <div style={{ animation: "fadeIn 0.3s ease" }}>
+            <div style={{ ...card, borderLeft: `4px solid ${projectColor}`, marginBottom: "28px" }}>
+              <div style={{ fontSize: "11px", fontFamily: "'Inter', sans-serif", fontWeight: "600", letterSpacing: "0.09em", textTransform: "uppercase", color: projectColor, marginBottom: "12px" }}>Summary · {project?.label}</div>
+              <p style={{ margin: 0, fontSize: "15px", lineHeight: "1.8", color: "#222", fontFamily: "Georgia, serif" }}>{result.summary}</p>
+            </div>
+
+            <div style={{ display: "flex", gap: "2px", background: "#ECEAE5", borderRadius: "9px", padding: "3px", marginBottom: "20px" }}>
+              {[{ id: "notes", label: "Cleaned Notes" }, { id: "todos", label: `To-dos (${result.todos?.length || 0})` }, { id: "links", label: `Links (${result.links?.length || 0})` }].map((tab) => (
+                <button key={tab.id} onClick={() => setActiveTab(tab.id)} style={{ flex: 1, padding: "9px 16px", borderRadius: "7px", border: "none", background: activeTab === tab.id ? "#FFF" : "transparent", color: activeTab === tab.id ? "#1A1A1A" : "#888", fontSize: "13px", fontWeight: activeTab === tab.id ? "600" : "400", cursor: "pointer", fontFamily: "'Inter', sans-serif", boxShadow: activeTab === tab.id ? "0 1px 3px rgba(0,0,0,0.09)" : "none" }}>{tab.label}</button>
+              ))}
+            </div>
+
+            <div style={{ ...card, padding: 0, overflow: "hidden", marginBottom: "24px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 20px", borderBottom: "1px solid #F0EDE8", background: "#FAFAF8" }}>
+                <span style={{ fontSize: "12px", color: "#BBB", fontFamily: "'Inter', sans-serif" }}>{activeTab === "notes" ? "Formatted notes" : activeTab === "todos" ? "Action items" : "Saved links"}</span>
+                <button onClick={() => { const c = activeTab === "notes" ? result.cleanedNotes : activeTab === "todos" ? result.todos?.map((t, i) => `${i+1}. ${t}`).join("\n") : result.links?.join("\n"); copyToClipboard(c || "", activeTab); }} style={{ padding: "5px 14px", background: copiedSection === activeTab ? projectColor : "transparent", border: `1px solid ${copiedSection === activeTab ? projectColor : "#E0DDD8"}`, borderRadius: "5px", color: copiedSection === activeTab ? "#FFF" : "#666", fontSize: "12px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer" }}>{copiedSection === activeTab ? "✓ Copied" : "Copy"}</button>
+              </div>
+              <div style={{ padding: "24px 28px", maxHeight: "380px", overflowY: "auto" }}>
+                {activeTab === "notes" && <div style={{ fontSize: "15px", lineHeight: "1.85", color: "#1A1A1A", fontFamily: "Georgia, serif", whiteSpace: "pre-wrap" }}>{result.cleanedNotes}</div>}
+                {activeTab === "todos" && <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>{result.todos?.length ? result.todos.map((todo, i) => (<div key={i} style={{ display: "flex", gap: "14px", alignItems: "flex-start", padding: "14px 16px", background: "#FAFAF8", border: "1px solid #F0EDE8", borderRadius: "8px" }}><div style={{ width: "17px", height: "17px", borderRadius: "4px", border: `1.5px solid ${projectColor}`, flexShrink: 0, marginTop: "3px" }} /><span style={{ fontSize: "14px", color: "#1A1A1A", lineHeight: "1.65", fontFamily: "'Inter', sans-serif" }}>{todo}</span></div>)) : <div style={{ color: "#BBB", fontSize: "14px", fontFamily: "'Inter', sans-serif" }}>No to-dos found.</div>}</div>}
+                {activeTab === "links" && <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>{result.links?.length ? result.links.map((link, i) => (<div key={i} style={{ padding: "12px 16px", background: "#FAFAF8", border: "1px solid #F0EDE8", borderRadius: "8px", display: "flex", alignItems: "center", gap: "12px" }}><div style={{ width: "6px", height: "6px", borderRadius: "50%", background: projectColor, flexShrink: 0 }} /><a href={link} target="_blank" rel="noreferrer" style={{ fontSize: "13px", color: projectColor, textDecoration: "none", wordBreak: "break-all", fontFamily: "'Inter', sans-serif" }}>{link}</a></div>)) : <div style={{ color: "#BBB", fontSize: "14px", fontFamily: "'Inter', sans-serif" }}>No links detected.</div>}</div>}
+              </div>
+            </div>
+
+            {saveStatus === null && (
+              <div style={{ ...card, marginBottom: "24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
+                <div>
+                  <div style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600", color: "#1A1A1A", marginBottom: "4px" }}>Save everything automatically</div>
+                  <div style={{ fontSize: "13px", color: "#888", fontFamily: "'Inter', sans-serif" }}>Note → Google Drive · To-dos + Links → Notion</div>
+                </div>
+                <button onClick={handleSave} style={{ padding: "12px 22px", borderRadius: "8px", border: "none", background: projectColor, color: "#FFF", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "600", cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 }}>Save to Notion + Drive →</button>
+              </div>
+            )}
+
+            {(saveStatus === "saving" || saveStatus === "done") && (
+              <div style={{ ...card, marginBottom: "24px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
+                  {saveStatus === "saving" && <div style={{ width: "16px", height: "16px", border: `2px solid ${projectColor}30`, borderTopColor: projectColor, borderRadius: "50%", animation: "spin 0.8s linear infinite", flexShrink: 0 }} />}
+                  {saveStatus === "done" && <span>✓</span>}
+                  <span style={{ fontSize: "14px", fontFamily: "'Inter', sans-serif", fontWeight: "600" }}>{saveStatus === "saving" ? "Saving…" : "Saved!"}</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  {saveLog.map((log, i) => (
+                    <div key={i} style={{ fontSize: "12px", fontFamily: "'Inter', sans-serif", color: log.type === "success" ? "#059669" : log.type === "error" ? "#B91C1C" : "#888", display: "flex", gap: "8px" }}>
+                      <span>{log.type === "success" ? "✓" : log.type === "error" ? "✗" : "·"}</span>
+                      <span>{log.msg}</span>
+                    </div>
+                  ))}
+                </div>
+                {saveStatus === "done" && (savedLinks.notion || savedLinks.gdrive) && (
+                  <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid #F0EDE8", display: "flex", gap: "12px", flexWrap: "wrap" }}>
+                    {savedLinks.notion && <a href={savedLinks.notion} target="_blank" rel="noreferrer" style={{ padding: "8px 16px", borderRadius: "6px", background: "#1A1A1A", color: "#FFF", fontSize: "12px", fontFamily: "'Inter', sans-serif", fontWeight: "500", textDecoration: "none" }}>Open in Notion →</a>}
+                    {savedLinks.gdrive && <a href={savedLinks.gdrive} target="_blank" rel="noreferrer" style={{ padding: "8px 16px", borderRadius: "6px", background: projectColor, color: "#FFF", fontSize: "12px", fontFamily: "'Inter', sans-serif", fontWeight: "500", textDecoration: "none" }}>Open in Drive →</a>}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button onClick={handleReset} style={{ padding: "11px 22px", background: "transparent", border: "1.5px solid #E0DDD8", borderRadius: "8px", color: "#666", fontSize: "13px", fontFamily: "'Inter', sans-serif", fontWeight: "500", cursor: "pointer" }}>← New Notes</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
