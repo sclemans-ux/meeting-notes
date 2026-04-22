@@ -123,7 +123,7 @@ async function saveDocToNotion(fileName, projectLabel, notes) {
       Project: { select: { name: projectLabel } },
       "Date Added": { date: { start: today() } },
       Notes: { rich_text: richText(notesText) },
-      "userDefined:URL": { url: driveUrl },
+      "URL": { url: driveUrl },
     },
   });
 }
