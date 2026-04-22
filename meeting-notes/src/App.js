@@ -73,12 +73,16 @@ async function saveToNotion(result, project) {
   });
 
   for (const todo of (result.todos || []).slice(0, 8)) {
+    const ownerMatch = todo.match(/^\[([^\]]+)\]\s*/);
+    const owner = ownerMatch ? ownerMatch[1] : "";
+    const taskText = ownerMatch ? todo.slice(ownerMatch[0].length) : todo;
     await notionPost("pages", {
       parent: { database_id: NOTION_TASKS_DB },
       properties: {
-        Task: { title: richText(todo) },
+        Task: { title: richText(taskText) },
         Project: { select: { name: project.label } },
         Status: { select: { name: "To Do" } },
+        Owner: { rich_text: richText(owner) },
         Source: { rich_text: richText(fullTitle) },
       },
     });
