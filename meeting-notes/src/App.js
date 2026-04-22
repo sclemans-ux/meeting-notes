@@ -105,8 +105,9 @@ async function saveToNotion(result, project) {
   return { notionUrl: notePage.url, fullTitle };
 }
 
-async function saveDocToNotion(fileName, projectLabel, notes) {
-  return notionPost("pages", {
+async function saveDocToNotion(fileName, projectLabel, notes, fileBase64, fileType) {
+  // 1. Create the Resources page in Notion
+  const page = await notionPost("pages", {
     parent: { database_id: NOTION_RESOURCES_DB },
     properties: {
       Title: { title: richText(fileName) },
@@ -115,6 +116,22 @@ async function saveDocToNotion(fileName, projectLabel, notes) {
       Notes: { rich_text: richText(notes || "") },
     },
   });
+
+  // 2. Upload the actual file and attach it to the page
+  if (fileBase64 && page.id) {
+    await fetch("/.netlify/functions/notion-upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pageId: page.id,
+        fileName,
+        fileType,
+        fileData: fileBase64,
+      }),
+    });
+  }
+
+  return page;
 }
 
 async function processNotes(rawNotes, projectLabel, apiKey) {
@@ -225,11 +242,18 @@ function DocumentUpload({ projectColor }) {
       addDocLog("Error saving file: " + e.message, "error");
     }
 
-    // 2. Save record to Notion Resources
-    addDocLog("Saving record to Notion…");
+    // 2. Save record + file to Notion Resources
+    addDocLog("Uploading file to Notion…");
     try {
-      await saveDocToNotion(docFile.name, docProjectObj.label, docNotes);
-      addDocLog("✓ Record added to Notion Resources", "success");
+      // Read file as base64
+      const fileBase64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(docFile);
+      });
+      await saveDocToNotion(docFile.name, docProjectObj.label, docNotes, fileBase64, docFile.type);
+      addDocLog("✓ File and record saved to Notion Resources", "success");
     } catch (e) {
       addDocLog("Error saving to Notion: " + e.message, "error");
     }
